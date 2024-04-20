@@ -1,0 +1,3 @@
+asyncio
+python-telegram-bot 
+yt-dlp
