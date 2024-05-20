@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import pyroscope
 
 from telegram import ReactionTypeEmoji, Update
 from telegram.constants import ReactionEmoji
@@ -14,19 +15,28 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 instagram_url_start = "https://www.instagram.com/"
 
+addr = os.getenv("PYROSCOPE_SERVER_ADDRESS") or "http://pyroscope:4040"
+logger.info("Pyroscope server is: ", addr)
 
-async def run(cmd):
+pyroscope.configure(
+    application_name="instelegio",
+    server_address=addr,
+    enable_logging=True,
+)
+
+
+async def runDownloader(cmd):
     proc = await asyncio.create_subprocess_shell(
         cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
 
     stdout, stderr = await proc.communicate()
 
-    print(f"[{cmd!r} exited with {proc.returncode}]")
+    logger.info(f"[{cmd!r} exited with {proc.returncode}]")
     if stdout:
-        print(f"[stdout]\n{stdout.decode()}")
+        logger.info(f"[stdout]\n{stdout.decode()}")
     if stderr:
-        print(f"[stderr]\n{stderr.decode()}")
+        logger.info(f"[stderr]\n{stderr.decode()}")
 
 
 def extract_link(message: str) -> str:
@@ -45,29 +55,35 @@ def extract_link(message: str) -> str:
     return link
 
 
-async def extract_instagram_vide(
+async def extract_instagram_video(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Reply with video thumbnal"""
+    """Reply with video thumbnail"""
     if instagram_url_start in update.message.text:
         filename = "/tmp/test.mp4"
-        await update.get_bot().set_message_reaction(
-            update.message.chat_id,
-            update.message.message_id,
-            [ReactionTypeEmoji(ReactionEmoji.EYES)],
-        )
-        try:
-            await run(
-                f"yt-dlp -v -f mp4 -o {filename} {extract_link(update.message.text)}"
+        with pyroscope.tag_wrapper({"function": "initial_reply"}):
+            await update.get_bot().set_message_reaction(
+                update.message.chat_id,
+                update.message.message_id,
+                [ReactionTypeEmoji(ReactionEmoji.EYES)],
             )
-            await update.message.reply_video(filename)
+        try:
+            with pyroscope.tag_wrapper({"function": "download_video"}):
+                link = extract_link(update.message.text)
+                await runDownloader(
+                    f"yt-dlp -v -f mp4 -o {filename} {link}"
+                )
+            with pyroscope.tag_wrapper({"function": "upload_video"}):
+                await update.message.reply_video(filename)
             await update.get_bot().set_message_reaction(
                 update.message.chat_id,
                 update.message.message_id,
                 [ReactionTypeEmoji(ReactionEmoji.FIRE)],
             )
-            os.remove(filename)
-        except Exception:
+            with pyroscope.tag_wrapper({"function": "remove_video"}):
+                os.remove(filename)
+        except Exception as e:
+            logger.error("Something went wrong: ", e)
             await update.get_bot().set_message_reaction(
                 update.message.chat_id,
                 update.message.message_id,
@@ -84,7 +100,8 @@ def main() -> None:
 
     # on non command i.e message - echo the message on Telegram
     application.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, extract_instagram_vide)
+        MessageHandler(filters.TEXT & ~filters.COMMAND,
+                       extract_instagram_video)
     )
 
     # Run the bot until the user presses Ctrl-C
